@@ -2,7 +2,7 @@ import os
 import time
 
 import aiosqlite
-from aiogram import Bot, F, Router
+from aiogram.filters import StateFilter
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -58,6 +58,14 @@ def name_confirm_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Верно", callback_data="form_name:confirm")],
             [InlineKeyboardButton(text="✏️ Ввести свои", callback_data="form_name:custom")],
+        ]
+    )
+
+
+def name_use_profile_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Использовать из профиля", callback_data="form_name:confirm")],
         ]
     )
 
@@ -205,22 +213,32 @@ async def show_pd_step(bot: Bot, chat_id: int) -> None:
     )
 
 
-@router.callback_query(F.data == "form_name:confirm", QuestionnaireStates.waiting_name_confirm)
-async def form_name_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+async def confirm_suggested_name(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    await save_name(
-        callback.from_user.id,
-        data.get("surname", ""),
-        data.get("given_name", ""),
-        data.get("patronymic", ""),
-    )
+    surname = data.get("surname", "")
+    given_name = data.get("given_name", "")
+    patronymic = data.get("patronymic", "")
+
+    if not surname and not given_name:
+        await callback.answer("Сначала введите ФИО текстом.", show_alert=True)
+        return
+
+    await save_name(callback.from_user.id, surname, given_name, patronymic)
     await state.set_state(QuestionnaireStates.waiting_phone)
     await callback.message.answer(
-        f"✅ ФИО сохранено: <b>{format_full_name(data.get('surname', ''), data.get('given_name', ''), data.get('patronymic', ''))}</b>",
+        f"✅ ФИО сохранено: <b>{format_full_name(surname, given_name, patronymic)}</b>",
         parse_mode=ParseMode.HTML,
     )
     await ask_phone(callback.message)
     await callback.answer()
+
+
+@router.callback_query(
+    F.data == "form_name:confirm",
+    StateFilter(QuestionnaireStates.waiting_name_confirm, QuestionnaireStates.waiting_custom_name),
+)
+async def form_name_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    await confirm_suggested_name(callback, state)
 
 
 @router.callback_query(F.data == "form_name:custom", QuestionnaireStates.waiting_name_confirm)
@@ -228,8 +246,10 @@ async def form_name_custom(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(QuestionnaireStates.waiting_custom_name)
     await callback.message.answer(
         "Введите фамилию, имя и отчество (отчество можно не указывать):\n"
-        "<i>Например: Иванов Иван Иванович</i>",
+        "<i>Например: Иванов Иван Иванович</i>\n\n"
+        "Или используйте данные из профиля Telegram:",
         parse_mode=ParseMode.HTML,
+        reply_markup=name_use_profile_keyboard(),
     )
     await callback.answer()
 
