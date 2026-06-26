@@ -17,7 +17,7 @@ from aiogram.types import (
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from rich_messages import send_rich_or_html, send_rich_or_html_parts
+from rich_messages import send_rich_or_html, edit_rich_or_html
 from texts import (
     RULES_RICH_HTML,
     RULES_FALLBACK_HTML,
@@ -65,11 +65,47 @@ def rules_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def letter_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Я прочитал письмо", callback_data="accept_letter")],
-        ]
+def letter_page_keyboard(page: int) -> InlineKeyboardMarkup:
+    total_pages = len(LETTER_PARTS)
+    rows: list[list[InlineKeyboardButton]] = []
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"letter_page:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"letter_page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    if page == total_pages - 1:
+        rows.append(
+            [InlineKeyboardButton(text="✅ Я прочитал письмо", callback_data="accept_letter")]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_letter_page(bot: Bot, chat_id: int, page: int) -> None:
+    rich_html, fallback_html = LETTER_PARTS[page]
+    await send_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        chat_id=chat_id,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=letter_page_keyboard(page),
+    )
+
+
+async def show_letter_page(bot: Bot, message: Message, page: int) -> None:
+    rich_html, fallback_html = LETTER_PARTS[page]
+    await edit_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        message=message,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=letter_page_keyboard(page),
     )
 
 
@@ -283,15 +319,20 @@ async def accept_rules(callback: CallbackQuery, bot: Bot) -> None:
         RULES_VERSION,
     )
 
-    await send_rich_or_html_parts(
-        bot=bot,
-        bot_token=BOT_TOKEN,
-        chat_id=callback.from_user.id,
-        parts=LETTER_PARTS,
-        reply_markup=letter_keyboard(),
-    )
+    await send_letter_page(bot, callback.from_user.id, page=0)
 
     await callback.answer("Правила подтверждены")
+
+
+@router.callback_query(F.data.startswith("letter_page:"))
+async def letter_page(callback: CallbackQuery, bot: Bot) -> None:
+    page = int(callback.data.split(":", 1)[1])
+    if page < 0 or page >= len(LETTER_PARTS):
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+
+    await show_letter_page(bot, callback.message, page)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "accept_letter")

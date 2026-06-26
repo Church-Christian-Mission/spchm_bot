@@ -1,9 +1,11 @@
 import os
-from typing import Optional, Sequence
+from typing import Optional
 
 import aiohttp
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import InlineKeyboardMarkup, Message
 
 
 USE_RICH_MESSAGES = os.getenv("USE_RICH_MESSAGES", "1") == "1"
@@ -59,32 +61,32 @@ async def send_rich_or_html(
         await bot.send_message(chat_id=chat_id, text=fallback_html, reply_markup=reply_markup)
 
 
-async def send_rich_or_html_parts(
+async def edit_rich_or_html(
     *,
     bot: Bot,
     bot_token: str,
-    chat_id: int,
-    parts: Sequence[tuple[str, str]],
+    message: Message,
+    rich_html: str,
+    fallback_html: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
-    if not parts:
-        return
+    try:
+        await message.edit_text(
+            text=fallback_html,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest:
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
 
-    for rich_html, fallback_html in parts[:-1]:
         await send_rich_or_html(
             bot=bot,
             bot_token=bot_token,
-            chat_id=chat_id,
+            chat_id=message.chat.id,
             rich_html=rich_html,
             fallback_html=fallback_html,
+            reply_markup=reply_markup,
         )
-
-    rich_html, fallback_html = parts[-1]
-    await send_rich_or_html(
-        bot=bot,
-        bot_token=bot_token,
-        chat_id=chat_id,
-        rich_html=rich_html,
-        fallback_html=fallback_html,
-        reply_markup=reply_markup,
-    )
