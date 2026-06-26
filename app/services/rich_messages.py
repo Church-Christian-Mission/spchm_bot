@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 
 import aiohttp
@@ -7,8 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, Message
 
-
-USE_RICH_MESSAGES = os.getenv("USE_RICH_MESSAGES", "1") == "1"
+from app.config import USE_RICH_MESSAGES
 
 
 async def send_rich_or_html(
@@ -20,18 +18,6 @@ async def send_rich_or_html(
     fallback_html: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
-    """
-    Отправляет Telegram Rich Message через Bot API 10.1.
-
-    Если Rich Messages недоступны или Telegram вернул ошибку,
-    автоматически отправляет обычное HTML-сообщение через aiogram.
-
-    Почему так:
-    - Rich Messages появились недавно.
-    - Обёртки aiogram могут не сразу поддерживать sendRichMessage.
-    - Обычный HTML нужен как стабильный fallback.
-    """
-
     if not USE_RICH_MESSAGES:
         await bot.send_message(chat_id=chat_id, text=fallback_html, reply_markup=reply_markup)
         return
