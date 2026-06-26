@@ -27,11 +27,23 @@ ADMIN_IDS = {int(item.strip()) for item in os.getenv("ADMIN_IDS", "").split(",")
 router = Router()
 
 USERS_PER_PAGE = 15
+SEND_USERS_PER_PAGE = 8
+STATS_TABLE_PER_PAGE = 5
 BROADCAST_DELAY_SEC = 0.05
+
+STAGE_ORDER = ["all", "start", "rules", "pd", "joined"]
+STAGE_LABELS = {
+    "all": "👥 Все пользователи",
+    "start": "🆕 Без правил",
+    "rules": "📜 Правила ✓",
+    "pd": "🔐 Согласие ✓, не в чате",
+    "joined": "✅ Вступили в чат",
+}
+
+_stats_pages: dict[int, dict[str, int]] = {}
 
 
 class SendMessageStates(StatesGroup):
-    waiting_user_ref = State()
     waiting_message = State()
     waiting_confirm = State()
 
@@ -72,20 +84,6 @@ def format_user_identity(row: dict[str, Any]) -> str:
     return identity
 
 
-def format_user_line_fallback(row: dict[str, Any]) -> str:
-    identity = format_user_identity(row)
-    stage = user_stage_label(row)
-    return f"• {identity} — <code>{row['telegram_id']}</code>\n  {stage}"
-
-
-def format_user_line_rich(row: dict[str, Any]) -> str:
-    identity = format_user_identity(row)
-    stage = user_stage_label(row)
-    return (
-        f"<li><b>{identity}</b> — <code>{row['telegram_id']}</code><br/>{stage}</li>"
-    )
-
-
 def user_stage_label(row: dict[str, Any]) -> str:
     if row["joined"]:
         return "✅ в чате"
@@ -94,6 +92,18 @@ def user_stage_label(row: dict[str, Any]) -> str:
     if row["accepted_rules"]:
         return "📜 правила ✓"
     return "🆕 только /start"
+
+
+def default_stats_pages() -> dict[str, int]:
+    return {key: 0 for key in STAGE_ORDER}
+
+
+def get_admin_stats_pages(admin_id: int) -> dict[str, int]:
+    return _stats_pages.setdefault(admin_id, default_stats_pages())
+
+
+def reset_admin_stats_pages(admin_id: int) -> None:
+    _stats_pages[admin_id] = default_stats_pages()
 
 
 async def fetch_stage_counts() -> dict[str, int]:
@@ -108,12 +118,16 @@ async def fetch_stage_counts() -> dict[str, int]:
     return counts
 
 
-async def fetch_users(stage: str, page: int) -> tuple[list[dict[str, Any]], int]:
+async def fetch_users(
+    stage: str,
+    page: int,
+    per_page: int = USERS_PER_PAGE,
+) -> tuple[list[dict[str, Any]], int]:
     if stage not in STAGES:
         raise ValueError("Unknown stage")
 
     where = STAGES[stage]["where"]
-    offset = page * USERS_PER_PAGE
+    offset = page * per_page
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -132,57 +146,148 @@ async def fetch_users(stage: str, page: int) -> tuple[list[dict[str, Any]], int]
             ORDER BY updated_at DESC
             LIMIT ? OFFSET ?
             """,
-            (USERS_PER_PAGE, offset),
+            (per_page, offset),
         )
         rows = await cursor.fetchall()
 
     return [dict(row) for row in rows], total
 
 
-def stats_overview_keyboard(counts: dict[str, int]) -> InlineKeyboardMarkup:
-    buttons = [
-        ("all", "👥 Все"),
-        ("start", "🆕 Старт"),
-        ("rules", "📜 Правила"),
-        ("pd", "🔐 Согласие"),
-        ("joined", "✅ В чате"),
-    ]
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{label} ({counts[key]})",
-                callback_data=f"stats_list:{key}:0",
-            )
-        ]
-        for key, label in buttons
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+async def fetch_user_by_id(telegram_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT
+                telegram_id, username, first_name, last_name,
+                accepted_rules, accepted_letter, accepted_pd, joined
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+
+    return dict(row) if row else None
 
 
-def stats_list_keyboard(stage: str, page: int, total: int) -> InlineKeyboardMarkup:
+    return dict(row) if row else None
+
+
+def build_stage_users_table_rich(users: list[dict[str, Any]]) -> str:
+    if not users:
+        return "<p>Пока никого нет.</p>"
+
+    rows = "".join(
+        (
+            "<tr>"
+            f"<td>{format_user_identity(user)}</td>"
+            f"<td><code>{user['telegram_id']}</code></td>"
+            f"<td>{user_stage_label(user)}</td>"
+            "</tr>"
+        )
+        for user in users
+    )
+    return (
+        "<table bordered striped>"
+        "<tr><th>Пользователь</th><th>ID</th><th>Этап</th></tr>"
+        f"{rows}"
+        "</table>"
+    )
+
+
+def build_stage_users_table_fallback(users: list[dict[str, Any]]) -> str:
+    if not users:
+        return "Пока никого нет."
+
+    lines = [
+        f"• {format_user_identity(user)} — {user['telegram_id']} · {user_stage_label(user)}"
+        for user in users
+    ]
+    return "\n".join(lines)
+
+
+def build_stage_details_rich(
+    stage: str,
+    users: list[dict[str, Any]],
+    total: int,
+    page: int,
+) -> str:
+    max_page = max((total - 1) // STATS_TABLE_PER_PAGE, 0)
+    page_info = f"<p>Страница {page + 1} из {max_page + 1} · всего {total}</p>" if total else ""
+    return (
+        f"<details>\n"
+        f"  <summary>{STAGE_LABELS[stage]} ({total})</summary>\n"
+        f"  {build_stage_users_table_rich(users)}\n"
+        f"  {page_info}\n"
+        f"</details>"
+    )
+
+
+def build_stage_details_fallback(
+    stage: str,
+    users: list[dict[str, Any]],
+    total: int,
+    page: int,
+) -> str:
+    max_page = max((total - 1) // STATS_TABLE_PER_PAGE, 0)
+    page_info = (
+        f"Страница {page + 1} из {max_page + 1} · всего {total}\n\n"
+        if total
+        else "\n"
+    )
+    return (
+        f"<b>{STAGE_LABELS[stage]} ({total})</b>\n"
+        f"{page_info}"
+        f"{build_stage_users_table_fallback(users)}"
+    )
+
+
+def stats_pagination_keyboard(pages: dict[str, int], totals: dict[str, int]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    max_page = max((total - 1) // USERS_PER_PAGE, 0)
 
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
+    for stage in STAGE_ORDER:
+        page = pages[stage]
+        total = totals[stage]
+        max_page = max((total - 1) // STATS_TABLE_PER_PAGE, 0)
+        nav: list[InlineKeyboardButton] = []
+
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"stats_page:{stage}:{page - 1}",
+                )
+            )
+
         nav.append(
-            InlineKeyboardButton(text="⬅️", callback_data=f"stats_list:{stage}:{page - 1}")
+            InlineKeyboardButton(
+                text=f"{STAGE_LABELS[stage]} {page + 1}/{max_page + 1}",
+                callback_data="stats_noop",
+            )
         )
-    if page < max_page:
-        nav.append(
-            InlineKeyboardButton(text="➡️", callback_data=f"stats_list:{stage}:{page + 1}")
-        )
-    if nav:
+
+        if page < max_page:
+            nav.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"stats_page:{stage}:{page + 1}",
+                )
+            )
+
         rows.append(nav)
 
-    rows.append([InlineKeyboardButton(text="📊 Сводка", callback_data="stats_overview")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="stats_overview")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_overview_html(counts: dict[str, int]) -> tuple[str, str]:
-    rich_html = f"""
-<h2>📊 Статистика онбординга</h2>
+async def build_stats_overview(admin_id: int) -> tuple[str, str, InlineKeyboardMarkup]:
+    counts = await fetch_stage_counts()
+    pages = get_admin_stats_pages(admin_id)
 
+    rich_parts = [
+        "<h2>📊 Статистика онбординга</h2>",
+        f"""
 <table bordered striped>
   <tr><th>Этап</th><th>Кол-во</th></tr>
   <tr><td>👥 Всего в боте</td><td>{counts["all"]}</td></tr>
@@ -191,46 +296,36 @@ def build_overview_html(counts: dict[str, int]) -> tuple[str, str]:
   <tr><td>🔐 Согласие ✓, не в чате</td><td>{counts["pd"]}</td></tr>
   <tr><td>✅ Вступили в чат</td><td>{counts["joined"]}</td></tr>
 </table>
+""",
+        "<p>Списки пользователей по этапам:</p>",
+    ]
 
-<p>Выберите этап, чтобы посмотреть список людей.</p>
-"""
+    fallback_parts = [
+        "<b>📊 Статистика онбординга</b>",
+        (
+            f"👥 Всего в боте: <b>{counts['all']}</b>\n"
+            f"🆕 Без правил: <b>{counts['start']}</b>\n"
+            f"📜 Правила ✓: <b>{counts['rules']}</b>\n"
+            f"🔐 Согласие ✓, не в чате: <b>{counts['pd']}</b>\n"
+            f"✅ Вступили в чат: <b>{counts['joined']}</b>"
+        ),
+        "<b>Списки пользователей по этапам:</b>",
+    ]
 
-    fallback_html = (
-        "<b>📊 Статистика онбординга</b>\n\n"
-        f"👥 Всего в боте: <b>{counts['all']}</b>\n"
-        f"🆕 Без правил: <b>{counts['start']}</b>\n"
-        f"📜 Правила ✓: <b>{counts['rules']}</b>\n"
-        f"🔐 Согласие ✓, не в чате: <b>{counts['pd']}</b>\n"
-        f"✅ Вступили в чат: <b>{counts['joined']}</b>\n\n"
-        "Выберите этап, чтобы посмотреть список людей."
-    )
-    return rich_html, fallback_html
+    for stage in STAGE_ORDER:
+        users, total = await fetch_users(
+            stage,
+            pages[stage],
+            per_page=STATS_TABLE_PER_PAGE,
+        )
+        rich_parts.append(build_stage_details_rich(stage, users, total, pages[stage]))
+        fallback_parts.append(
+            build_stage_details_fallback(stage, users, total, pages[stage])
+        )
 
-
-async def build_list_html(stage: str, page: int) -> tuple[str, str, InlineKeyboardMarkup]:
-    users, total = await fetch_users(stage, page)
-    title = STAGES[stage]["title"]
-    max_page = max((total - 1) // USERS_PER_PAGE, 0)
-    keyboard = stats_list_keyboard(stage, page, total)
-
-    if total == 0:
-        rich_html = f"<h2>{title}</h2>\n\n<p>Пока никого нет.</p>"
-        fallback_html = f"<b>{title}</b>\n\nПока никого нет."
-        return rich_html, fallback_html, keyboard
-
-    rich_items = "".join(format_user_line_rich(user) for user in users)
-    fallback_lines = "\n".join(format_user_line_fallback(user) for user in users)
-
-    rich_html = (
-        f"<h2>{title}</h2>\n"
-        f"<p>Страница {page + 1} из {max_page + 1} · всего {total}</p>\n"
-        f"<ul>{rich_items}</ul>"
-    )
-    fallback_html = (
-        f"<b>{title}</b>\n"
-        f"Страница {page + 1} из {max_page + 1} · всего {total}\n\n"
-        f"{fallback_lines}"
-    )
+    rich_html = "\n".join(rich_parts)
+    fallback_html = "\n\n".join(fallback_parts)
+    keyboard = stats_pagination_keyboard(pages, counts)
     return rich_html, fallback_html, keyboard
 
 
@@ -251,15 +346,15 @@ async def stats_command(message: Message, bot: Bot) -> None:
         )
         return
 
-    counts = await fetch_stage_counts()
-    rich_html, fallback_html = build_overview_html(counts)
+    reset_admin_stats_pages(message.from_user.id)
+    rich_html, fallback_html, keyboard = await build_stats_overview(message.from_user.id)
     await send_rich_or_html(
         bot=bot,
         bot_token=BOT_TOKEN,
         chat_id=message.from_user.id,
         rich_html=rich_html,
         fallback_html=fallback_html,
-        reply_markup=stats_overview_keyboard(counts),
+        reply_markup=keyboard,
     )
 
 
@@ -269,21 +364,26 @@ async def stats_overview_callback(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    counts = await fetch_stage_counts()
-    rich_html, fallback_html = build_overview_html(counts)
+    reset_admin_stats_pages(callback.from_user.id)
+    rich_html, fallback_html, keyboard = await build_stats_overview(callback.from_user.id)
     await edit_rich_or_html(
         bot=bot,
         bot_token=BOT_TOKEN,
         message=callback.message,
         rich_html=rich_html,
         fallback_html=fallback_html,
-        reply_markup=stats_overview_keyboard(counts),
+        reply_markup=keyboard,
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("stats_list:"))
-async def stats_list_callback(callback: CallbackQuery, bot: Bot) -> None:
+@router.callback_query(F.data == "stats_noop")
+async def stats_noop_callback(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stats_page:"))
+async def stats_page_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
@@ -291,11 +391,20 @@ async def stats_list_callback(callback: CallbackQuery, bot: Bot) -> None:
     _, stage, page_raw = callback.data.split(":", 2)
     page = int(page_raw)
 
-    if stage not in STAGES:
+    if stage not in STAGE_ORDER:
         await callback.answer("Неизвестный этап", show_alert=True)
         return
 
-    rich_html, fallback_html, keyboard = await build_list_html(stage, page)
+    pages = get_admin_stats_pages(callback.from_user.id)
+    _, total = await fetch_users(stage, page, per_page=STATS_TABLE_PER_PAGE)
+    max_page = max((total - 1) // STATS_TABLE_PER_PAGE, 0)
+
+    if page < 0 or page > max_page:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+
+    pages[stage] = page
+    rich_html, fallback_html, keyboard = await build_stats_overview(callback.from_user.id)
     await edit_rich_or_html(
         bot=bot,
         bot_token=BOT_TOKEN,
@@ -328,37 +437,49 @@ def send_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def find_user_by_reference(reference: str) -> dict[str, Any] | None:
-    ref = reference.strip()
-    if not ref:
-        return None
+def format_user_button_label(row: dict[str, Any]) -> str:
+    identity = format_user_identity(row)
+    stage = user_stage_label(row)
+    label = f"{identity} · {stage}"
+    if len(label) <= 64:
+        return label
+    return f"{identity[:58]}…" if len(identity) > 58 else identity
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        if ref.startswith("@"):
-            cursor = await db.execute(
-                """
-                SELECT telegram_id, username, first_name, last_name
-                FROM users
-                WHERE lower(username) = lower(?)
-                """,
-                (ref[1:],),
+
+def build_send_picker_text(page: int, total: int) -> str:
+    max_page = max((total - 1) // SEND_USERS_PER_PAGE, 0)
+    return (
+        f"<b>Выберите получателя</b>\n"
+        f"Страница {page + 1} из {max_page + 1} · всего {total}"
+    )
+
+
+def send_user_picker_keyboard(
+    users: list[dict[str, Any]],
+    page: int,
+    total: int,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=format_user_button_label(user),
+                callback_data=f"send_pick:{user['telegram_id']}",
             )
-        elif ref.isdigit():
-            cursor = await db.execute(
-                """
-                SELECT telegram_id, username, first_name, last_name
-                FROM users
-                WHERE telegram_id = ?
-                """,
-                (int(ref),),
-            )
-        else:
-            return None
+        ]
+        for user in users
+    ]
 
-        row = await cursor.fetchone()
+    max_page = max((total - 1) // SEND_USERS_PER_PAGE, 0)
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"send_users:{page - 1}"))
+    if page < max_page:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"send_users:{page + 1}"))
+    if nav:
+        rows.append(nav)
 
-    return dict(row) if row else None
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="send_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def fetch_all_user_ids() -> list[int]:
@@ -437,13 +558,16 @@ async def send_target_callback(callback: CallbackQuery, state: FSMContext) -> No
 
     target_type = callback.data.split(":", 1)[1]
     if target_type == "one":
-        await state.set_state(SendMessageStates.waiting_user_ref)
-        await callback.message.answer(
-            "Укажите получателя:\n"
-            "• Telegram ID (например, <code>123456789</code>)\n"
-            "• или @username из базы бота",
-            parse_mode=ParseMode.HTML,
-        )
+        users, total = await fetch_users("all", 0, per_page=SEND_USERS_PER_PAGE)
+        if total == 0:
+            await callback.message.answer("В базе пока нет пользователей.")
+            await clear_send_state(state)
+        else:
+            await callback.message.answer(
+                build_send_picker_text(0, total),
+                parse_mode=ParseMode.HTML,
+                reply_markup=send_user_picker_keyboard(users, 0, total),
+            )
     elif target_type == "all":
         user_ids = await fetch_all_user_ids()
         if not user_ids:
@@ -464,19 +588,38 @@ async def send_target_callback(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
-@router.message(SendMessageStates.waiting_user_ref)
-async def send_user_ref_message(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
-        await send_access_denied(message)
+@router.callback_query(F.data.startswith("send_users:"))
+async def send_users_page_callback(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
         return
 
-    user = await find_user_by_reference(message.text or "")
+    page = int(callback.data.split(":", 1)[1])
+    users, total = await fetch_users("all", page, per_page=SEND_USERS_PER_PAGE)
+    max_page = max((total - 1) // SEND_USERS_PER_PAGE, 0)
+
+    if page < 0 or page > max_page:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        build_send_picker_text(page, total),
+        parse_mode=ParseMode.HTML,
+        reply_markup=send_user_picker_keyboard(users, page, total),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("send_pick:"))
+async def send_pick_user_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    user_id = int(callback.data.split(":", 1)[1])
+    user = await fetch_user_by_id(user_id)
     if not user:
-        await message.answer(
-            "Пользователь не найден в базе бота.\n"
-            "Проверьте ID или @username и попробуйте снова.\n"
-            "Отмена: /cancel"
-        )
+        await callback.answer("Пользователь не найден", show_alert=True)
         return
 
     identity = format_user_identity(user)
@@ -487,11 +630,13 @@ async def send_user_ref_message(message: Message, state: FSMContext) -> None:
         recipient_count=1,
     )
     await state.set_state(SendMessageStates.waiting_message)
-    await message.answer(
-        f"Получатель: <b>{identity}</b> (<code>{user['telegram_id']}</code>)\n\n"
+    await callback.message.answer(
+        f"Получатель: <b>{identity}</b> (<code>{user['telegram_id']}</code>)\n"
+        f"Этап: {user_stage_label(user)}\n\n"
         "Отправьте текст сообщения. Поддерживается HTML-разметка.",
         parse_mode=ParseMode.HTML,
     )
+    await callback.answer()
 
 
 @router.message(SendMessageStates.waiting_message)
