@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+env_example
+__pycache__
+*.pyc
+.venv
+venv
+.git
+.gitignore
+bot.db
+data/
+*.md
