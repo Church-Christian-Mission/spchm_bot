@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
@@ -17,23 +18,22 @@ from aiogram.types import (
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from rich_messages import send_rich_or_html, edit_rich_or_html
+load_dotenv()
+
+from admin import router as admin_router
+from rich_messages import send_rich_or_html
 from texts import (
     RULES_RICH_HTML,
     RULES_FALLBACK_HTML,
-    LETTER_PARTS,
     PD_RICH_HTML,
     PD_FALLBACK_HTML,
 )
 
 
-load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 
 RULES_VERSION = os.getenv("RULES_VERSION", "1.0")
-LETTER_VERSION = os.getenv("LETTER_VERSION", "1.0")
 PD_VERSION = os.getenv("PD_VERSION", "1.0")
 
 DB_PATH = os.getenv("DB_PATH", "bot.db")
@@ -45,7 +45,6 @@ router = Router()
 class UserStatus:
     telegram_id: int
     accepted_rules: bool
-    accepted_letter: bool
     accepted_pd: bool
 
 
@@ -62,50 +61,6 @@ def rules_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Я ознакомился с правилами", callback_data="accept_rules")],
         ]
-    )
-
-
-def letter_page_keyboard(page: int) -> InlineKeyboardMarkup:
-    total_pages = len(LETTER_PARTS)
-    rows: list[list[InlineKeyboardButton]] = []
-
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"letter_page:{page - 1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"letter_page:{page + 1}"))
-    if nav:
-        rows.append(nav)
-
-    if page == total_pages - 1:
-        rows.append(
-            [InlineKeyboardButton(text="✅ Я прочитал письмо", callback_data="accept_letter")]
-        )
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def send_letter_page(bot: Bot, chat_id: int, page: int) -> None:
-    rich_html, fallback_html = LETTER_PARTS[page]
-    await send_rich_or_html(
-        bot=bot,
-        bot_token=BOT_TOKEN,
-        chat_id=chat_id,
-        rich_html=rich_html,
-        fallback_html=fallback_html,
-        reply_markup=letter_page_keyboard(page),
-    )
-
-
-async def show_letter_page(bot: Bot, message: Message, page: int) -> None:
-    rich_html, fallback_html = LETTER_PARTS[page]
-    await edit_rich_or_html(
-        bot=bot,
-        bot_token=BOT_TOKEN,
-        message=message,
-        rich_html=rich_html,
-        fallback_html=fallback_html,
-        reply_markup=letter_page_keyboard(page),
     )
 
 
@@ -192,7 +147,6 @@ async def upsert_user(message_or_callback) -> None:
 async def set_accepted(user_id: int, field: str, version_field: str, accepted_at_field: str, version: str) -> None:
     allowed = {
         "accepted_rules": ("rules_version", "rules_accepted_at"),
-        "accepted_letter": ("letter_version", "letter_accepted_at"),
         "accepted_pd": ("pd_version", "pd_accepted_at"),
     }
 
@@ -225,7 +179,7 @@ async def get_status(user_id: int) -> UserStatus | None:
         db.row_factory = aiosqlite.Row
         row = await db.execute_fetchall(
             """
-            SELECT telegram_id, accepted_rules, accepted_letter, accepted_pd
+            SELECT telegram_id, accepted_rules, accepted_pd
             FROM users
             WHERE telegram_id=?
             """,
@@ -239,7 +193,6 @@ async def get_status(user_id: int) -> UserStatus | None:
     return UserStatus(
         telegram_id=item["telegram_id"],
         accepted_rules=bool(item["accepted_rules"]),
-        accepted_letter=bool(item["accepted_letter"]),
         accepted_pd=bool(item["accepted_pd"]),
     )
 
@@ -274,7 +227,7 @@ async def mark_joined(user_id: int) -> None:
 
 async def has_completed_onboarding(user_id: int) -> bool:
     status = await get_status(user_id)
-    return bool(status and status.accepted_rules and status.accepted_letter and status.accepted_pd)
+    return bool(status and status.accepted_rules and status.accepted_pd)
 
 
 @router.message(CommandStart())
@@ -285,8 +238,7 @@ async def start(message: Message) -> None:
         "Здравствуйте!\n\n"
         "Перед вступлением в чат необходимо пройти короткое ознакомление:\n\n"
         "1. Правила чата\n"
-        "2. Письмо / документ\n"
-        "3. Согласие на обработку персональных данных\n\n"
+        "2. Согласие на обработку персональных данных\n\n"
         "После этого бот выдаст ссылку для подачи заявки.",
         reply_markup=main_menu_keyboard(),
     )
@@ -319,33 +271,6 @@ async def accept_rules(callback: CallbackQuery, bot: Bot) -> None:
         RULES_VERSION,
     )
 
-    await send_letter_page(bot, callback.from_user.id, page=0)
-
-    await callback.answer("Правила подтверждены")
-
-
-@router.callback_query(F.data.startswith("letter_page:"))
-async def letter_page(callback: CallbackQuery, bot: Bot) -> None:
-    page = int(callback.data.split(":", 1)[1])
-    if page < 0 or page >= len(LETTER_PARTS):
-        await callback.answer("Страница не найдена", show_alert=True)
-        return
-
-    await show_letter_page(bot, callback.message, page)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "accept_letter")
-async def accept_letter(callback: CallbackQuery, bot: Bot) -> None:
-    await upsert_user(callback)
-    await set_accepted(
-        callback.from_user.id,
-        "accepted_letter",
-        "letter_version",
-        "letter_accepted_at",
-        LETTER_VERSION,
-    )
-
     await send_rich_or_html(
         bot=bot,
         bot_token=BOT_TOKEN,
@@ -355,7 +280,7 @@ async def accept_letter(callback: CallbackQuery, bot: Bot) -> None:
         reply_markup=pd_keyboard(),
     )
 
-    await callback.answer("Письмо подтверждено")
+    await callback.answer("Правила подтверждены")
 
 
 @router.callback_query(F.data == "decline_pd")
@@ -420,7 +345,7 @@ async def on_chat_join_request(join_request: ChatJoinRequest, bot: Bot) -> None:
                 chat_id=user_id,
                 text=(
                     "Заявка отклонена, потому что вы ещё не прошли все этапы ознакомления.\n\n"
-                    "Нажмите /start и пройдите правила, письмо и согласие."
+                    "Нажмите /start и пройдите правила и согласие."
                 ),
             )
         except Exception:
@@ -440,8 +365,9 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    dp.include_router(admin_router)
 
     await dp.start_polling(bot)
 

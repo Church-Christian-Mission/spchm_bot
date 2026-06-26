@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py rich_messages.py texts.py ./
+COPY bot.py admin.py rich_messages.py texts.py ./
 
 RUN mkdir -p /app/data
 
