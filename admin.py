@@ -31,11 +31,12 @@ SEND_USERS_PER_PAGE = 8
 STATS_TABLE_PER_PAGE = 5
 BROADCAST_DELAY_SEC = 0.05
 
-STAGE_ORDER = ["all", "start", "rules", "pd", "joined"]
+STAGE_ORDER = ["all", "start", "rules", "form", "pd", "joined"]
 STAGE_LABELS = {
     "all": "👥 Все пользователи",
     "start": "🆕 Без правил",
-    "rules": "📜 Правила ✓",
+    "rules": "📜 Правила ✓, анкета нет",
+    "form": "📝 Анкета ✓, согласие нет",
     "pd": "🔐 Согласие ✓, не в чате",
     "joined": "✅ Вступили в чат",
 }
@@ -51,8 +52,12 @@ STAGES: dict[str, dict[str, str]] = {
     "all": {"title": "Все пользователи", "where": "1=1"},
     "start": {"title": "Нажали /start, правила не приняты", "where": "accepted_rules = 0"},
     "rules": {
-        "title": "Правила приняты, согласие нет",
-        "where": "accepted_rules = 1 AND accepted_pd = 0",
+        "title": "Правила приняты, анкета не заполнена",
+        "where": "accepted_rules = 1 AND questionnaire_completed = 0",
+    },
+    "form": {
+        "title": "Анкета заполнена, согласие нет",
+        "where": "accepted_rules = 1 AND questionnaire_completed = 1 AND accepted_pd = 0",
     },
     "pd": {
         "title": "Согласие принято, в чат не вступили",
@@ -67,10 +72,22 @@ def is_admin(user_id: int) -> bool:
 
 
 def format_user_identity(row: dict[str, Any]) -> str:
-    username = row["username"]
-    first_name = row["first_name"] or ""
-    last_name = row["last_name"] or ""
-    full_name = " ".join(part for part in (first_name, last_name) if part).strip()
+    form_name = " ".join(
+        part
+        for part in (
+            row.get("surname") or "",
+            row.get("given_name") or "",
+            row.get("patronymic") or "",
+        )
+        if part
+    ).strip()
+
+    username = row.get("username")
+    first_name = row.get("first_name") or ""
+    last_name = row.get("last_name") or ""
+    full_name = form_name or " ".join(
+        part for part in (first_name, last_name) if part
+    ).strip()
 
     if username:
         identity = f"@{username}"
@@ -89,6 +106,8 @@ def user_stage_label(row: dict[str, Any]) -> str:
         return "✅ в чате"
     if row["accepted_pd"]:
         return "🔐 согласие ✓, ждёт вступления"
+    if row.get("questionnaire_completed"):
+        return "📝 анкета ✓"
     if row["accepted_rules"]:
         return "📜 правила ✓"
     return "🆕 только /start"
@@ -139,7 +158,9 @@ async def fetch_users(
             f"""
             SELECT
                 telegram_id, username, first_name, last_name,
+                surname, given_name, patronymic,
                 accepted_rules, accepted_letter, accepted_pd, joined,
+                questionnaire_completed,
                 created_at, joined_at
             FROM users
             WHERE {where}
@@ -160,6 +181,7 @@ async def fetch_user_by_id(telegram_id: int) -> dict[str, Any] | None:
             """
             SELECT
                 telegram_id, username, first_name, last_name,
+                surname, given_name, patronymic,
                 accepted_rules, accepted_letter, accepted_pd, joined
             FROM users
             WHERE telegram_id = ?
@@ -292,7 +314,8 @@ async def build_stats_overview(admin_id: int) -> tuple[str, str, InlineKeyboardM
   <tr><th>Этап</th><th>Кол-во</th></tr>
   <tr><td>👥 Всего в боте</td><td>{counts["all"]}</td></tr>
   <tr><td>🆕 Без правил</td><td>{counts["start"]}</td></tr>
-  <tr><td>📜 Правила ✓</td><td>{counts["rules"]}</td></tr>
+  <tr><td>📜 Правила ✓, анкета нет</td><td>{counts["rules"]}</td></tr>
+  <tr><td>📝 Анкета ✓, согласие нет</td><td>{counts["form"]}</td></tr>
   <tr><td>🔐 Согласие ✓, не в чате</td><td>{counts["pd"]}</td></tr>
   <tr><td>✅ Вступили в чат</td><td>{counts["joined"]}</td></tr>
 </table>
@@ -305,8 +328,9 @@ async def build_stats_overview(admin_id: int) -> tuple[str, str, InlineKeyboardM
         (
             f"👥 Всего в боте: <b>{counts['all']}</b>\n"
             f"🆕 Без правил: <b>{counts['start']}</b>\n"
-            f"📜 Правила ✓: <b>{counts['rules']}</b>\n"
-            f"🔐 Согласие ✓, не в чате: <b>{counts['pd']}</b>\n"
+        f"📜 Правила ✓, анкета нет: <b>{counts['rules']}</b>\n"
+        f"📝 Анкета ✓, согласие нет: <b>{counts['form']}</b>\n"
+        f"🔐 Согласие ✓, не в чате: <b>{counts['pd']}</b>\n"
             f"✅ Вступили в чат: <b>{counts['joined']}</b>"
         ),
         "<b>Списки пользователей по этапам:</b>",

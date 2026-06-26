@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -21,12 +22,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from admin import router as admin_router, setup_bot_commands
+from questionnaire import router as questionnaire_router, start_questionnaire
 from rich_messages import send_rich_or_html
 from texts import (
     RULES_RICH_HTML,
     RULES_FALLBACK_HTML,
-    PD_RICH_HTML,
-    PD_FALLBACK_HTML,
 )
 
 
@@ -45,6 +45,7 @@ router = Router()
 class UserStatus:
     telegram_id: int
     accepted_rules: bool
+    questionnaire_completed: bool
     accepted_pd: bool
 
 
@@ -60,15 +61,6 @@ def rules_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Я ознакомился с правилами", callback_data="accept_rules")],
-        ]
-    )
-
-
-def pd_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Согласен на обработку персональных данных", callback_data="accept_pd")],
-            [InlineKeyboardButton(text="❌ Не согласен", callback_data="decline_pd")],
         ]
     )
 
@@ -99,6 +91,15 @@ async def init_db() -> None:
                 letter_version TEXT,
                 letter_accepted_at INTEGER,
 
+                surname TEXT,
+                given_name TEXT,
+                patronymic TEXT,
+                phone TEXT,
+                city TEXT,
+                church_name TEXT,
+                questionnaire_completed INTEGER DEFAULT 0,
+                questionnaire_completed_at INTEGER,
+
                 accepted_pd INTEGER DEFAULT 0,
                 pd_version TEXT,
                 pd_accepted_at INTEGER,
@@ -112,7 +113,26 @@ async def init_db() -> None:
             )
             """
         )
+        await _migrate_db(db)
         await db.commit()
+
+
+async def _migrate_db(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in await cursor.fetchall()}
+    new_columns = [
+        ("surname", "TEXT"),
+        ("given_name", "TEXT"),
+        ("patronymic", "TEXT"),
+        ("phone", "TEXT"),
+        ("city", "TEXT"),
+        ("church_name", "TEXT"),
+        ("questionnaire_completed", "INTEGER DEFAULT 0"),
+        ("questionnaire_completed_at", "INTEGER"),
+    ]
+    for name, typedef in new_columns:
+        if name not in existing:
+            await db.execute(f"ALTER TABLE users ADD COLUMN {name} {typedef}")
 
 
 async def upsert_user(message_or_callback) -> None:
@@ -179,7 +199,7 @@ async def get_status(user_id: int) -> UserStatus | None:
         db.row_factory = aiosqlite.Row
         row = await db.execute_fetchall(
             """
-            SELECT telegram_id, accepted_rules, accepted_pd
+            SELECT telegram_id, accepted_rules, questionnaire_completed, accepted_pd
             FROM users
             WHERE telegram_id=?
             """,
@@ -193,6 +213,7 @@ async def get_status(user_id: int) -> UserStatus | None:
     return UserStatus(
         telegram_id=item["telegram_id"],
         accepted_rules=bool(item["accepted_rules"]),
+        questionnaire_completed=bool(item["questionnaire_completed"]),
         accepted_pd=bool(item["accepted_pd"]),
     )
 
@@ -227,7 +248,12 @@ async def mark_joined(user_id: int) -> None:
 
 async def has_completed_onboarding(user_id: int) -> bool:
     status = await get_status(user_id)
-    return bool(status and status.accepted_rules and status.accepted_pd)
+    return bool(
+        status
+        and status.accepted_rules
+        and status.questionnaire_completed
+        and status.accepted_pd
+    )
 
 
 @router.message(CommandStart())
@@ -238,7 +264,8 @@ async def start(message: Message) -> None:
         "Здравствуйте!\n\n"
         "Перед вступлением в чат необходимо пройти короткое ознакомление:\n\n"
         "1. Правила чата\n"
-        "2. Согласие на обработку персональных данных\n\n"
+        "2. Анкета (ФИО, телефон, город, церковь)\n"
+        "3. Согласие на обработку персональных данных\n\n"
         "После этого бот выдаст ссылку для подачи заявки.",
         reply_markup=main_menu_keyboard(),
     )
@@ -261,7 +288,7 @@ async def show_rules(callback: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data == "accept_rules")
-async def accept_rules(callback: CallbackQuery, bot: Bot) -> None:
+async def accept_rules(callback: CallbackQuery, state: FSMContext) -> None:
     await upsert_user(callback)
     await set_accepted(
         callback.from_user.id,
@@ -271,15 +298,7 @@ async def accept_rules(callback: CallbackQuery, bot: Bot) -> None:
         RULES_VERSION,
     )
 
-    await send_rich_or_html(
-        bot=bot,
-        bot_token=BOT_TOKEN,
-        chat_id=callback.from_user.id,
-        rich_html=PD_RICH_HTML,
-        fallback_html=PD_FALLBACK_HTML,
-        reply_markup=pd_keyboard(),
-    )
-
+    await start_questionnaire(callback.message, callback.from_user, state)
     await callback.answer("Правила подтверждены")
 
 
@@ -345,7 +364,7 @@ async def on_chat_join_request(join_request: ChatJoinRequest, bot: Bot) -> None:
                 chat_id=user_id,
                 text=(
                     "Заявка отклонена, потому что вы ещё не прошли все этапы ознакомления.\n\n"
-                    "Нажмите /start и пройдите правила и согласие."
+                    "Нажмите /start и пройдите правила, анкету и согласие."
                 ),
             )
         except Exception:
@@ -367,6 +386,7 @@ async def main() -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    dp.include_router(questionnaire_router)
     dp.include_router(admin_router)
 
     await setup_bot_commands(bot)
