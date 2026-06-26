@@ -6,7 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.config import BOT_TOKEN, TARGET_CHAT_ID
+from app.config import BOT_TOKEN, TARGET_CHAT_ID, log_admin_config
 from app.db import init_db
 from app.handlers.admin import router as admin_router
 from app.handlers.admin.commands import setup_bot_commands
@@ -24,6 +24,8 @@ async def main() -> None:
         raise RuntimeError("BOT_TOKEN is empty")
     if not TARGET_CHAT_ID:
         raise RuntimeError("TARGET_CHAT_ID is empty")
+
+    log_admin_config()
 
     await init_db()
 

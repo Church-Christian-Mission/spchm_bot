@@ -13,6 +13,7 @@ from app.handlers.admin.state import (
     reset_admin_stats_pages,
 )
 from app.handlers.admin.views import build_forms_view, build_stats_overview
+from app.services.callbacks import safe_answer_callback
 from app.services.rich_messages import edit_rich_or_html, send_rich_or_html
 
 router = Router()
@@ -46,9 +47,10 @@ async def stats_command(message: Message, bot: Bot) -> None:
 @router.callback_query(F.data == "stats_overview")
 async def stats_overview_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     reset_admin_stats_pages(callback.from_user.id)
     rich_html, fallback_html, keyboard = await build_stats_overview(callback.from_user.id)
     await edit_rich_or_html(
@@ -59,25 +61,24 @@ async def stats_overview_callback(callback: CallbackQuery, bot: Bot) -> None:
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "stats_noop")
 async def stats_noop_callback(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_answer_callback(callback)
 
 
 @router.callback_query(F.data.startswith("stats_page:"))
 async def stats_page_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     _, stage, page_raw = callback.data.split(":", 2)
     page = int(page_raw)
 
     if stage not in STAGE_ORDER:
-        await callback.answer("Неизвестный этап", show_alert=True)
+        await safe_answer_callback(callback, "Неизвестный этап", show_alert=True)
         return
 
     pages = get_admin_stats_pages(callback.from_user.id)
@@ -85,9 +86,10 @@ async def stats_page_callback(callback: CallbackQuery, bot: Bot) -> None:
     max_page = max((total - 1) // STATS_TABLE_PER_PAGE, 0)
 
     if page < 0 or page > max_page:
-        await callback.answer("Страница не найдена", show_alert=True)
+        await safe_answer_callback(callback, "Страница не найдена", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     pages[stage] = page
     rich_html, fallback_html, keyboard = await build_stats_overview(callback.from_user.id)
     await edit_rich_or_html(
@@ -98,15 +100,15 @@ async def stats_page_callback(callback: CallbackQuery, bot: Bot) -> None:
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "stats_forms")
 async def stats_forms_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     reset_admin_form_state(callback.from_user.id)
     rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
     await edit_rich_or_html(
@@ -117,15 +119,15 @@ async def stats_forms_callback(callback: CallbackQuery, bot: Bot) -> None:
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "stats_forms_refresh")
 async def stats_forms_refresh_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
+    await safe_answer_callback(callback, "Обновлено")
     rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
     await edit_rich_or_html(
         bot=bot,
@@ -135,20 +137,20 @@ async def stats_forms_refresh_callback(callback: CallbackQuery, bot: Bot) -> Non
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer("Обновлено")
 
 
 @router.callback_query(F.data.startswith("form_filter:"))
 async def form_filter_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     filter_key = callback.data.split(":", 1)[1]
     if filter_key not in FORM_FILTERS:
-        await callback.answer("Неизвестный фильтр", show_alert=True)
+        await safe_answer_callback(callback, "Неизвестный фильтр", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     state = get_admin_form_state(callback.from_user.id)
     state["filter"] = filter_key
     state["page"] = 0
@@ -162,13 +164,12 @@ async def form_filter_callback(callback: CallbackQuery, bot: Bot) -> None:
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("form_page:"))
 async def form_page_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     page = int(callback.data.split(":", 1)[1])
@@ -178,9 +179,10 @@ async def form_page_callback(callback: CallbackQuery, bot: Bot) -> None:
     max_page = max((total - 1) // FORMS_TABLE_PER_PAGE, 0)
 
     if page < 0 or page > max_page:
-        await callback.answer("Страница не найдена", show_alert=True)
+        await safe_answer_callback(callback, "Страница не найдена", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     state["page"] = page
     rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
     await edit_rich_or_html(
@@ -191,4 +193,3 @@ async def form_page_callback(callback: CallbackQuery, bot: Bot) -> None:
         fallback_html=fallback_html,
         reply_markup=keyboard,
     )
-    await callback.answer()

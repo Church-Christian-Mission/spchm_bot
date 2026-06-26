@@ -17,6 +17,7 @@ from app.config import ADMIN_IDS, BROADCAST_DELAY_SEC, BOT_TOKEN, SEND_USERS_PER
 from app.db.repository import fetch_all_user_ids, fetch_user_by_id, fetch_users
 from app.handlers.admin.auth import is_admin, send_access_denied
 from app.handlers.admin.constants import STAGES
+from app.services.callbacks import safe_answer_callback
 from app.services.user_display import format_user_identity, user_stage_label
 
 router = Router()
@@ -146,22 +147,23 @@ async def send_cancel_command(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "send_cancel")
 async def send_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     await clear_send_state(state)
     await callback.message.answer("Отправка отменена.")
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("send_target:"))
 async def send_target_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     target_type = callback.data.split(":", 1)[1]
     if target_type == "one":
+        await safe_answer_callback(callback)
         users, total = await fetch_users("all", STAGES, 0, per_page=SEND_USERS_PER_PAGE)
         if total == 0:
             await callback.message.answer("В базе пока нет пользователей.")
@@ -173,6 +175,7 @@ async def send_target_callback(callback: CallbackQuery, state: FSMContext) -> No
                 reply_markup=send_user_picker_keyboard(users, 0, total),
             )
     elif target_type == "all":
+        await safe_answer_callback(callback)
         user_ids = await fetch_all_user_ids()
         if not user_ids:
             await callback.message.answer("В базе пока нет пользователей.")
@@ -186,16 +189,13 @@ async def send_target_callback(callback: CallbackQuery, state: FSMContext) -> No
                 parse_mode=ParseMode.HTML,
             )
     else:
-        await callback.answer("Неизвестный тип рассылки", show_alert=True)
-        return
-
-    await callback.answer()
+        await safe_answer_callback(callback, "Неизвестный тип рассылки", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("send_users:"))
 async def send_users_page_callback(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     page = int(callback.data.split(":", 1)[1])
@@ -203,29 +203,30 @@ async def send_users_page_callback(callback: CallbackQuery) -> None:
     max_page = max((total - 1) // SEND_USERS_PER_PAGE, 0)
 
     if page < 0 or page > max_page:
-        await callback.answer("Страница не найдена", show_alert=True)
+        await safe_answer_callback(callback, "Страница не найдена", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     await callback.message.edit_text(
         build_send_picker_text(page, total),
         parse_mode=ParseMode.HTML,
         reply_markup=send_user_picker_keyboard(users, page, total),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("send_pick:"))
 async def send_pick_user_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     user_id = int(callback.data.split(":", 1)[1])
     user = await fetch_user_by_id(user_id)
     if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
+        await safe_answer_callback(callback, "Пользователь не найден", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     identity = format_user_identity(user)
     await state.update_data(
         target_type="one",
@@ -240,7 +241,6 @@ async def send_pick_user_callback(callback: CallbackQuery, state: FSMContext) ->
         "Отправьте текст сообщения. Поддерживается HTML-разметка.",
         parse_mode=ParseMode.HTML,
     )
-    await callback.answer()
 
 
 @router.message(SendMessageStates.waiting_message)
@@ -279,16 +279,17 @@ async def send_message_text(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "send_confirm:yes", SendMessageStates.waiting_confirm)
 async def send_confirm_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
+        await safe_answer_callback(callback, "Недостаточно прав", show_alert=True)
         return
 
     data = await state.get_data()
     text = data.get("message_text", "").strip()
     if not text:
-        await callback.answer("Текст сообщения пустой", show_alert=True)
+        await safe_answer_callback(callback, "Текст сообщения пустой", show_alert=True)
         await clear_send_state(state)
         return
 
+    await safe_answer_callback(callback, "Отправляю…")
     target_type = data.get("target_type")
     sent = 0
     failed = 0
@@ -309,7 +310,6 @@ async def send_confirm_callback(callback: CallbackQuery, state: FSMContext, bot:
     else:
         await callback.message.answer("Не удалось определить получателя.")
         await clear_send_state(state)
-        await callback.answer()
         return
 
     await clear_send_state(state)
@@ -317,4 +317,3 @@ async def send_confirm_callback(callback: CallbackQuery, state: FSMContext, bot:
         f"Готово.\nОтправлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
         parse_mode=ParseMode.HTML,
     )
-    await callback.answer("Сообщение отправлено")
