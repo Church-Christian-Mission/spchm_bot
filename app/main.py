@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -14,6 +15,11 @@ from app.handlers.questionnaire import router as questionnaire_router
 
 
 async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is empty")
     if not TARGET_CHAT_ID:
