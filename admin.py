@@ -8,7 +8,15 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from rich_messages import edit_rich_or_html, send_rich_or_html
 
@@ -561,3 +569,25 @@ async def send_confirm_callback(callback: CallbackQuery, state: FSMContext, bot:
         parse_mode=ParseMode.HTML,
     )
     await callback.answer("Сообщение отправлено")
+
+
+USER_COMMANDS = [
+    BotCommand(command="start", description="Начать ознакомление"),
+]
+
+ADMIN_COMMANDS = [
+    BotCommand(command="start", description="Начать ознакомление"),
+    BotCommand(command="stats", description="Статистика пользователей"),
+    BotCommand(command="send", description="Отправить сообщение"),
+    BotCommand(command="cancel", description="Отменить рассылку"),
+]
+
+
+async def setup_bot_commands(bot: Bot) -> None:
+    await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+
+    for admin_id in ADMIN_IDS:
+        await bot.set_my_commands(
+            ADMIN_COMMANDS,
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from admin import router as admin_router
+from admin import router as admin_router, setup_bot_commands
 from rich_messages import send_rich_or_html
 from texts import (
     RULES_RICH_HTML,
@@ -369,6 +369,7 @@ async def main() -> None:
     dp.include_router(router)
     dp.include_router(admin_router)
 
+    await setup_bot_commands(bot)
     await dp.start_polling(bot)
 
 
