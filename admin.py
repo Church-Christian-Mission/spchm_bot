@@ -29,7 +29,41 @@ router = Router()
 USERS_PER_PAGE = 15
 SEND_USERS_PER_PAGE = 8
 STATS_TABLE_PER_PAGE = 5
+FORMS_TABLE_PER_PAGE = 8
 BROADCAST_DELAY_SEC = 0.05
+DEFAULT_CHURCH_NAME = "Христианская Миссия"
+
+FORM_FILTER_ORDER = ["completed", "incomplete", "joined", "default_church", "other_church"]
+FORM_FILTERS: dict[str, dict[str, Any]] = {
+    "completed": {
+        "label": "✅ Заполнены",
+        "where": "questionnaire_completed = 1",
+        "params": [],
+    },
+    "incomplete": {
+        "label": "⏳ Не заполнены",
+        "where": "accepted_rules = 1 AND questionnaire_completed = 0",
+        "params": [],
+    },
+    "joined": {
+        "label": "👥 В чате",
+        "where": "questionnaire_completed = 1 AND joined = 1",
+        "params": [],
+    },
+    "default_church": {
+        "label": "⛪ ХМ",
+        "where": "questionnaire_completed = 1 AND church_name = ?",
+        "params": [DEFAULT_CHURCH_NAME],
+    },
+    "other_church": {
+        "label": "⛪ Другие",
+        "where": (
+            "questionnaire_completed = 1 AND church_name IS NOT NULL "
+            "AND church_name != ?"
+        ),
+        "params": [DEFAULT_CHURCH_NAME],
+    },
+}
 
 STAGE_ORDER = ["all", "start", "rules", "form", "pd", "joined"]
 STAGE_LABELS = {
@@ -42,6 +76,7 @@ STAGE_LABELS = {
 }
 
 _stats_pages: dict[int, dict[str, int]] = {}
+_form_state: dict[int, dict[str, Any]] = {}
 
 
 class SendMessageStates(StatesGroup):
@@ -125,6 +160,18 @@ def reset_admin_stats_pages(admin_id: int) -> None:
     _stats_pages[admin_id] = default_stats_pages()
 
 
+def default_form_state() -> dict[str, Any]:
+    return {"filter": "completed", "page": 0}
+
+
+def get_admin_form_state(admin_id: int) -> dict[str, Any]:
+    return _form_state.setdefault(admin_id, default_form_state())
+
+
+def reset_admin_form_state(admin_id: int) -> None:
+    _form_state[admin_id] = default_form_state()
+
+
 async def fetch_stage_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
     async with aiosqlite.connect(DB_PATH) as db:
@@ -174,6 +221,50 @@ async def fetch_users(
     return [dict(row) for row in rows], total
 
 
+async def fetch_form_users(
+    filter_key: str,
+    page: int,
+    per_page: int = FORMS_TABLE_PER_PAGE,
+) -> tuple[list[dict[str, Any]], int]:
+    if filter_key not in FORM_FILTERS:
+        raise ValueError("Unknown form filter")
+
+    meta = FORM_FILTERS[filter_key]
+    where = meta["where"]
+    params: list[Any] = list(meta["params"])
+    offset = page * per_page
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        count_cursor = await db.execute(
+            f"SELECT COUNT(*) FROM users WHERE {where}",
+            params,
+        )
+        count_row = await count_cursor.fetchone()
+        total = count_row[0] if count_row else 0
+
+        cursor = await db.execute(
+            f"""
+            SELECT
+                telegram_id, username, first_name, last_name,
+                surname, given_name, patronymic,
+                phone, city, church_name,
+                accepted_rules, accepted_pd, joined, questionnaire_completed
+            FROM users
+            WHERE {where}
+            ORDER BY
+                CASE WHEN questionnaire_completed_at IS NULL THEN 0 ELSE 1 END DESC,
+                questionnaire_completed_at DESC,
+                updated_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, per_page, offset),
+        )
+        rows = await cursor.fetchall()
+
+    return [dict(row) for row in rows], total
+
+
 async def fetch_user_by_id(telegram_id: int) -> dict[str, Any] | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -193,7 +284,129 @@ async def fetch_user_by_id(telegram_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-    return dict(row) if row else None
+def format_form_full_name(row: dict[str, Any]) -> str:
+    form_name = " ".join(
+        part
+        for part in (
+            row.get("surname") or "",
+            row.get("given_name") or "",
+            row.get("patronymic") or "",
+        )
+        if part
+    ).strip()
+    if form_name:
+        return form_name
+    return format_user_identity(row)
+
+
+def html_cell(value: str | None) -> str:
+    if not value:
+        return "—"
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_forms_table_rich(users: list[dict[str, Any]]) -> str:
+    if not users:
+        return "<p>По выбранному фильтру никого нет.</p>"
+
+    rows = "".join(
+        (
+            "<tr>"
+            f"<td>{html_cell(format_form_full_name(user))}</td>"
+            f"<td>{html_cell(user.get('phone'))}</td>"
+            f"<td>{html_cell(user.get('city'))}</td>"
+            f"<td>{html_cell(user.get('church_name'))}</td>"
+            f"<td>{user_stage_label(user)}</td>"
+            f"<td><code>{user['telegram_id']}</code></td>"
+            "</tr>"
+        )
+        for user in users
+    )
+    return (
+        "<table bordered striped>"
+        "<tr><th>ФИО</th><th>Телефон</th><th>Город</th><th>Церковь</th><th>Этап</th><th>ID</th></tr>"
+        f"{rows}"
+        "</table>"
+    )
+
+
+def build_forms_table_fallback(users: list[dict[str, Any]]) -> str:
+    if not users:
+        return "По выбранному фильтру никого нет."
+
+    lines = []
+    for user in users:
+        lines.append(
+            f"• <b>{format_form_full_name(user)}</b>\n"
+            f"  📱 {user.get('phone') or '—'} · 🏙 {user.get('city') or '—'}\n"
+            f"  ⛪ {user.get('church_name') or '—'} · {user_stage_label(user)}\n"
+            f"  ID: <code>{user['telegram_id']}</code>"
+        )
+    return "\n\n".join(lines)
+
+
+def forms_filter_keyboard(active_filter: str) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+
+    for key in FORM_FILTER_ORDER:
+        label = FORM_FILTERS[key]["label"]
+        text = f"• {label}" if key == active_filter else label
+        row.append(InlineKeyboardButton(text=text, callback_data=f"form_filter:{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+
+    if row:
+        rows.append(row)
+
+    return rows
+
+
+def forms_pagination_keyboard(filter_key: str, page: int, total: int) -> InlineKeyboardMarkup:
+    max_page = max((total - 1) // FORMS_TABLE_PER_PAGE, 0)
+    rows = forms_filter_keyboard(filter_key)
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"form_page:{page - 1}"))
+    nav.append(
+        InlineKeyboardButton(
+            text=f"Стр. {page + 1}/{max_page + 1}",
+            callback_data="stats_noop",
+        )
+    )
+    if page < max_page:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"form_page:{page + 1}"))
+    rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="📊 Сводка", callback_data="stats_overview")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="stats_forms_refresh")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def build_forms_view(admin_id: int) -> tuple[str, str, InlineKeyboardMarkup]:
+    state = get_admin_form_state(admin_id)
+    filter_key = state["filter"]
+    page = state["page"]
+    users, total = await fetch_form_users(filter_key, page)
+    max_page = max((total - 1) // FORMS_TABLE_PER_PAGE, 0)
+    filter_label = FORM_FILTERS[filter_key]["label"]
+
+    rich_html = (
+        "<h2>📋 Таблица анкет</h2>\n"
+        f"<p>Фильтр: <b>{filter_label}</b> · "
+        f"страница {page + 1} из {max_page + 1} · всего {total}</p>\n"
+        f"{build_forms_table_rich(users)}"
+    )
+    fallback_html = (
+        f"<b>📋 Таблица анкет</b>\n"
+        f"Фильтр: <b>{filter_label}</b>\n"
+        f"Страница {page + 1} из {max_page + 1} · всего {total}\n\n"
+        f"{build_forms_table_fallback(users)}"
+    )
+    keyboard = forms_pagination_keyboard(filter_key, page, total)
+    return rich_html, fallback_html, keyboard
 
 
 def build_stage_users_table_rich(users: list[dict[str, Any]]) -> str:
@@ -299,6 +512,7 @@ def stats_pagination_keyboard(pages: dict[str, int], totals: dict[str, int]) -> 
 
         rows.append(nav)
 
+    rows.append([InlineKeyboardButton(text="📋 Таблица анкет", callback_data="stats_forms")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="stats_overview")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -429,6 +643,98 @@ async def stats_page_callback(callback: CallbackQuery, bot: Bot) -> None:
 
     pages[stage] = page
     rich_html, fallback_html, keyboard = await build_stats_overview(callback.from_user.id)
+    await edit_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        message=callback.message,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats_forms")
+async def stats_forms_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    reset_admin_form_state(callback.from_user.id)
+    rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
+    await edit_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        message=callback.message,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats_forms_refresh")
+async def stats_forms_refresh_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
+    await edit_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        message=callback.message,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=keyboard,
+    )
+    await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data.startswith("form_filter:"))
+async def form_filter_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    filter_key = callback.data.split(":", 1)[1]
+    if filter_key not in FORM_FILTERS:
+        await callback.answer("Неизвестный фильтр", show_alert=True)
+        return
+
+    state = get_admin_form_state(callback.from_user.id)
+    state["filter"] = filter_key
+    state["page"] = 0
+
+    rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
+    await edit_rich_or_html(
+        bot=bot,
+        bot_token=BOT_TOKEN,
+        message=callback.message,
+        rich_html=rich_html,
+        fallback_html=fallback_html,
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("form_page:"))
+async def form_page_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    page = int(callback.data.split(":", 1)[1])
+    state = get_admin_form_state(callback.from_user.id)
+    _, total = await fetch_form_users(state["filter"], page)
+    max_page = max((total - 1) // FORMS_TABLE_PER_PAGE, 0)
+
+    if page < 0 or page > max_page:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+
+    state["page"] = page
+    rich_html, fallback_html, keyboard = await build_forms_view(callback.from_user.id)
     await edit_rich_or_html(
         bot=bot,
         bot_token=BOT_TOKEN,
